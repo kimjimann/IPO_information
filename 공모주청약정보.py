@@ -5,10 +5,14 @@ import pandas as pd
 from datetime import datetime
 import array as arr
 import numpy as np
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from gspread_dataframe import get_as_dataframe, set_with_dataframe
 
 #공모주청약일정 정보
 def get_IPO_subscription_data_from_38(page=1): 
-    total_data = []
+    total_data = [] #모든 데이터 (상장일, 환불일 제외)
+    listing_refunding_data = [] #상장일 환불일 데이터
 
     #공모주 청약일정 데이터 수집
     for p in range(1, page + 2): # 페이지당 노출 행이 30개
@@ -19,14 +23,18 @@ def get_IPO_subscription_data_from_38(page=1):
        data = soup.find('table', {'summary': '공모주 청약일정'})
        data = data.find_all('tr')[2:]
        total_data = total_data + data
-       
+
     stock_name_list = [] #종목명
     ipo_schedule_list = [] #공모주일정
     confirmed_ipo_price_list = [] #확정공모가
     desired_ipo_price_list = [] #희망공모가
     subscription_competition_rate_list =[] #청약경쟁률
     underwriting_firm_list = [] #주간사
+    name_analyze_list = [] #상세분석URL
+    listing_data_list = [] #상장일
+    RefundDate_list= [] #환불일
     
+
     #열(row)별 파싱
     for row in range(0, len(total_data)):
          data_list = total_data[row].text.replace('\xa0', '').replace('\t\t', '').split('\n')[1:-1]
@@ -38,15 +46,37 @@ def get_IPO_subscription_data_from_38(page=1):
          desired_ipo_price_list.append(data_list[3].strip())
          subscription_competition_rate_list.append(data_list[4].strip())
          underwriting_firm_list.append(data_list[5].strip())
-    
+
+   #상세분석 URL a 태그 파싱
+    for row in range(0, len(total_data)):
+    # 각 row에서 'a' 태그를 찾습니다.
+     a_tag = total_data[row].find('a')
+    # 'href' 속성을 추출하고 리스트에 추가합니다.
+     href = a_tag['href']
+     name_analyze_list.append(href)
+
+   #상장,환불일 구하기 (상세분석 URL을 토대로 4번째 5번째 테이블 값인 환불일, 상장일을 가져옴)
+    for p in name_analyze_list: # 60까지
+       fullUrl = 'http://www.38.co.kr%s' %p 
+       response = requests.get(fullUrl, headers={'User-Agent': 'Mozilla/5.0'})
+       html = response.text
+       soup = BeautifulSoup(html, 'lxml')
+       data = soup.find('table', {'summary': '공모청약일정'})
+       RefundDate_list.append(data.find_all('tr')[4].find_all('td')[1].get_text(strip=True)) #환불일
+       listing_data_list.append(data.find_all('tr')[5].find_all('td')[1].get_text(strip=True)) #상장일
+       
     #청약 일정 변수
     schedule = pd.DataFrame({'종목명': stock_name_list,
                              '공모주일정': ipo_schedule_list,
+                             '환불일': RefundDate_list,
+                             '상장일': listing_data_list,
                              '확정공모가': confirmed_ipo_price_list,
                              '희망공모가': desired_ipo_price_list,
                              '청약경쟁률': subscription_competition_rate_list,
-                             '주간사': underwriting_firm_list})
+                             '주간사': underwriting_firm_list
+                             })
     return schedule
+
 IPO_subscription = get_IPO_subscription_data_from_38()
 
 #수요예측일정 정보
@@ -173,28 +203,6 @@ for agencies in column_data:
     fee_total.append(fees)
 
 IPO_merge['주간사별 수수료'] = fee_total #주간사별 수수료를 IPO_merge 행에 추가
-
-'''for data_1 in column_data : #행 길이 만큼 반복 -> 60까지만 반복
-             column_data_list[data_1] = column_data[data_1].split(', ') #, 기준으로 파싱 후 할당
-             for data_2 in range(0,len(column_data_list)): #, 기준으로 나눈 key 별 value 얻기
-                fee_total[data_2].append(column_data_list[data_2]+':'+fee_dict[column_data_list[data_2]]) #주간사 : 수수료'''
-                
-#IPO_merge['주간사별 수수료'] = fee_total
-
-'''for a in range(1,len(fee_dict)):
-   if(column_data[0] == fee_dict.key):
-      column_data[0] = fee_dict.values'''
-
-#청약정보에 주간사별 수수료 맵핑
-'''def merge_IPO_fee():
-   total_security = []  #증권사(주간사) 총 갯수
-   for row in range(1, len(column_data)): #공모주 정보 행 갯수 만큼 반복
-      for column in range(0, column_data[row]): #행 별 주간사 갯수 더하기
-         print(len(column_data[row]))'''
-
-'''for row in range(0, len(column_data)): #공모주 정보 행 갯수 만큼 반복
-   for column in range(0, len(column_data[row])): #행 별 주간사 갯수 더하기
-      print(len(column_data[row]))'''
       
 #파일명에 금일날짜 추가
 #금일 날짜 받아오기
@@ -202,5 +210,18 @@ today = datetime.today().strftime('%Y%m%d_%H%M%S')
 
 # 파일 경로 삽입하여 원하는 곳에 저장
 # f-string 사용해 문자열에 today 변수 삽입
-#통합 정보 출력
+# 통합 정보 출력
 IPO_merge.to_excel(f'D:\React\python_스크래핑\공모주청약정보_엑셀\{today} - 통합 공모주 정보.xlsx')
+
+#스프레드시트에 엑셀 복사
+# 구글 API 인증 정보 로드
+json_file_path = "D:\\React\\python_스크래핑\\exemplary-vista-402211-d49b6d696870.json"
+gc = gspread.service_account(json_file_path)
+# 스프레드 시트 주소 연결
+spreadsheet_url = "https://docs.google.com/spreadsheets/d/11M6ineiwWlFOzfkvd3tsDUaQ27gogZISdFQ_Tnfha9w/edit"
+doc = gc.open_by_url(spreadsheet_url)
+
+#워크시트 "이름"으로 열기ㅣ
+worksheet = doc.worksheet("공모주데이터")
+#워크시트를 데이터 프레임으로 업데이트
+set_with_dataframe(worksheet, IPO_merge)
